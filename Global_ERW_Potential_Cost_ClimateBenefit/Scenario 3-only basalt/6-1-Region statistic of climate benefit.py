@@ -1,0 +1,161 @@
+# 按区域/次区域统计气候效益：潜力加权平均（允许气候效益为负）
+
+import os
+import numpy as np
+import pandas as pd
+from osgeo import gdal
+
+trade = False       # 是否考虑贸易
+maxcb = True       # 是否最大化气候净效益（否则是最小成本）
+start_year = 2025  # Primary scenario. Use grid_scope_summary.py for the multi-year Table S10 series.
+
+# ===================== 1. 基本路径 =====================
+os.chdir(r"E:/wzy/2-Grid-based-MONET")
+
+if maxcb:
+    if trade:
+        # 气候效益栅格（单位通常是 $/tCO2 removed）
+        climate_benefit_path = rf"./Output/EW/Global/Scenario 3/{start_year}/maxclimatebenefit_withtrade/EW_climate_benefit_maxnetbenefit_raster (with trade).tif"
+
+        # 对应的潜力栅格（用于加权，单位 MtCO2）
+        potential_path = rf"./Output/EW/Global/Scenario 3/{start_year}/maxclimatebenefit_withtrade/EW_potential_maxnetbenefit_raster (with trade).tif"
+
+        # 输出
+        output_csv_sub = rf"./Output/EW/Global/Scenario 3/{start_year}/maxclimatebenefit_withtrade/EW_climatebenefit_by_region_subregion.csv"
+        output_csv_reg = rf"./Output/EW/Global/Scenario 3/{start_year}/maxclimatebenefit_withtrade/EW_climatebenefit_by_region.csv"
+    else:
+        # 气候效益栅格（单位通常是 $/tCO2 removed）
+        climate_benefit_path = rf"./Output/EW/Global/Scenario 3/{start_year}/maxclimatebenefit_notrade/EW_climate_benefit_maxnetbenefit_raster.tif"
+
+        # 对应的潜力栅格（用于加权，单位 MtCO2）
+        potential_path = rf"./Output/EW/Global/Scenario 3/{start_year}/maxclimatebenefit_notrade/EW_potential_maxnetbenefit_raster.tif"
+
+        # 输出
+        output_csv_sub = rf"./Output/EW/Global/Scenario 3/{start_year}/maxclimatebenefit_notrade/EW_climatebenefit_by_region_subregion.csv"
+        output_csv_reg = rf"./Output/EW/Global/Scenario 3/{start_year}/maxclimatebenefit_notrade/EW_climatebenefit_by_region.csv"
+else:
+    if trade:
+        # 气候效益栅格（单位通常是 $/tCO2 removed）
+        climate_benefit_path = rf"./Output/EW/Global/Scenario 3/{start_year}/mincost_withtrade/EW_climate_benefit_mincost_raster (with trade).tif"
+
+        # 对应的潜力栅格（用于加权，单位 MtCO2）
+        potential_path = rf"./Output/EW/Global/Scenario 3/{start_year}/mincost_withtrade/EW_potential_mincost_raster (with trade).tif"
+
+        # 输出
+        output_csv_sub = rf"./Output/EW/Global/Scenario 3/{start_year}/mincost_withtrade/EW_climatebenefit_by_region_subregion.csv"
+        output_csv_reg = rf"./Output/EW/Global/Scenario 3/{start_year}/mincost_withtrade/EW_climatebenefit_by_region.csv"
+    else:
+        # 气候效益栅格（单位通常是 $/tCO2 removed）
+        climate_benefit_path = rf"./Output/EW/Global/Scenario 3/{start_year}/mincost_notrade/EW_climate_benefit_mincost_raster.tif"
+
+        # 对应的潜力栅格（用于加权，单位 MtCO2）
+        potential_path = rf"./Output/EW/Global/Scenario 3/{start_year}/mincost_notrade/EW_potential_mincost_raster.tif"
+
+        # 输出
+        output_csv_sub = rf"./Output/EW/Global/Scenario 3/{start_year}/mincost_notrade/EW_climatebenefit_by_region_subregion.csv"
+        output_csv_reg = rf"./Output/EW/Global/Scenario 3/{start_year}/mincost_notrade/EW_climatebenefit_by_region.csv"
+
+# 全球区域 / 次区域栅格
+region_path    = r"E:/ArcGIS/Projects/Country/Region.tif"
+subregion_path = r"E:/ArcGIS/Projects/Country/Subregion.tif"
+
+# 你保存栅格时用的 NoData（若不确定，可 print band.GetNoDataValue() 看）
+NODATA = -9999.0
+
+# ===================== 2. 读取栅格 =====================
+cb_ds   = gdal.Open(climate_benefit_path)
+pot_ds  = gdal.Open(potential_path)
+reg_ds  = gdal.Open(region_path)
+sub_ds  = gdal.Open(subregion_path)
+
+cb_arr  = cb_ds.ReadAsArray().astype(float)
+pot_arr = pot_ds.ReadAsArray().astype(float)
+reg_arr = reg_ds.ReadAsArray()
+sub_arr = sub_ds.ReadAsArray()
+
+print("CB shape:", cb_arr.shape)
+print("Pot shape:", pot_arr.shape)
+print("Region shape:", reg_arr.shape)
+print("Subregion shape:", sub_arr.shape)
+
+if cb_arr.shape != pot_arr.shape or cb_arr.shape != reg_arr.shape or cb_arr.shape != sub_arr.shape:
+    raise ValueError("栅格尺寸不一致，请先确保它们同分辨率同范围同像元对齐。")
+
+# ===================== 3. 构造有效像元掩膜 =====================
+# 关键点：
+# - 气候效益允许为负值，所以不能用 cb_arr > 0 来筛
+# - 只要 cb 有效且 pot 有效且 pot>0，就可以参与加权平均
+valid_cb  = (~np.isnan(cb_arr))  & (cb_arr  != NODATA)
+valid_pot = (~np.isnan(pot_arr)) & (pot_arr != NODATA) & (pot_arr > 0)
+valid_reg = (reg_arr > 0)
+valid_sub = (sub_arr > 0)
+
+valid_mask = valid_cb & valid_pot & valid_reg & valid_sub
+print("有效像元数量:", int(np.sum(valid_mask)))
+
+# ===================== 3.5 输出全球潜力加权平均气候效益（不保存） =====================
+cb_glb  = cb_arr[valid_mask]   # $/tCO2
+pot_glb = pot_arr[valid_mask]  # MtCO2
+
+total_potential_glb_mt = np.nansum(pot_glb)
+
+if total_potential_glb_mt > 0:
+    weighted_cb_glb = np.nansum(cb_glb * pot_glb) / total_potential_glb_mt
+else:
+    weighted_cb_glb = np.nan
+
+print("\n========== Global (Potential-weighted) ==========")
+print(f"Global total potential: {total_potential_glb_mt:.6f} MtCO2  ({total_potential_glb_mt/1000.0:.6f} GtCO2)")
+print(f"Global weighted average climate benefit: {weighted_cb_glb:.6f} $/tCO2")
+print("=================================================\n")
+
+# ===================== 4. 按 Region/Subregion 统计加权平均 =====================
+rows_sub = []
+rows_reg = []
+
+unique_regions = np.unique(reg_arr[valid_mask])
+
+for reg_id in unique_regions:
+    reg_mask = valid_mask & (reg_arr == reg_id)
+
+    # 区域级：加权平均 = sum(cb * pot) / sum(pot)
+    pot_sum_reg = np.nansum(pot_arr[reg_mask])
+    if pot_sum_reg <= 0:
+        continue
+
+    cb_weighted_reg = np.nansum(cb_arr[reg_mask] * pot_arr[reg_mask]) / pot_sum_reg
+
+    rows_reg.append({
+        "Region_ID": int(reg_id),
+        "Potential_Sum_MtCO2": float(pot_sum_reg),
+        "Weighted_ClimateBenefit_USD_per_tCO2": float(cb_weighted_reg)
+    })
+
+    # 次区域级
+    unique_subregions = np.unique(sub_arr[reg_mask])
+    for sub_id in unique_subregions:
+        sub_mask = reg_mask & (sub_arr == sub_id)
+
+        pot_sum = np.nansum(pot_arr[sub_mask])
+        if pot_sum <= 0:
+            continue
+
+        cb_weighted = np.nansum(cb_arr[sub_mask] * pot_arr[sub_mask]) / pot_sum
+
+        rows_sub.append({
+            "Region_ID": int(reg_id),
+            "Subregion_ID": int(sub_id),
+            "Potential_Sum_MtCO2": float(pot_sum),
+            "Weighted_ClimateBenefit_USD_per_tCO2": float(cb_weighted)
+        })
+
+df_sub = pd.DataFrame(rows_sub).sort_values(["Region_ID", "Subregion_ID"]).reset_index(drop=True)
+df_reg = pd.DataFrame(rows_reg).sort_values(["Region_ID"]).reset_index(drop=True)
+
+# ===================== 5. 保存 =====================
+os.makedirs(os.path.dirname(output_csv_sub), exist_ok=True)
+df_sub.to_csv(output_csv_sub, index=False, float_format="%.6f")
+df_reg.to_csv(output_csv_reg, index=False, float_format="%.6f")
+
+print("已保存次区域 CSV:", output_csv_sub)
+print("已保存区域 CSV:", output_csv_reg)
